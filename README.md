@@ -73,6 +73,37 @@ eval "$(proxyctl env --unset)"
 
 `update` 成功后保存配置，下载或解析失败保留旧配置；它不会自动影响正在运行的核心。需要应用新配置时执行 `stop`、`start`。
 
+## Dashboard、代理模式与 TUN
+
+启动 HTTP 面板，默认监听 **`0.0.0.0:8787`**：
+
+```sh
+proxyctl dashboard
+# 另一个终端查看带访问令牌的链接
+proxyctl dashboard --show-url
+```
+
+启动后输出使用实际网卡 IP、带 `#token=` 的访问链接。本机监听时使用 `127.0.0.1`；云服务器公网 NAT 场景可用 `--public-host 152.136.54.246` 指定公网 IP，启动后保留，后续 `--show-url` 直接输出该地址。也可直接打开 `http://服务器IP:8787/` 后输入面板令牌。每次重启面板生成新令牌；令牌保存于私有状态目录，浏览器仅在当前会话保存。HTTP 明文传输面板操作与令牌，跨公网使用时可通过 HTTPS 反向代理或 SSH 转发访问。
+
+面板支持节点选择、延迟测试、连接与断开、Proxy Mode 和 TUN 开关，无需前端依赖或第三方 CDN。服务在前台运行；`Ctrl-C` 关闭面板，核心保持当前运行状态。可用 `--port 18787` 换端口、`--host 127.0.0.1` 限制本机访问、`--open` 打开浏览器。
+
+命令行也支持相同控制：
+
+```sh
+proxyctl mode           # 查看模式与 TUN 状态
+proxyctl mode rule      # 按配置规则分流
+proxyctl mode global    # 使用 GLOBAL 组的选择
+proxyctl nodes          # 查看实际代理组名称和候选节点
+proxyctl use '节点名称' --group GLOBAL
+proxyctl mode direct    # 直接连接
+proxyctl tun on
+proxyctl tun off
+```
+
+模式与 TUN 设置在线生效，并保留到后续启动；核心未运行时会保存下次启动的设置。TUN 仅支持 Linux，需要 `/dev/net/tun` 和核心进程的 `CAP_NET_ADMIN`（通常以 root 启动核心）。默认关闭；显式开启后创建 `odcloud0` 虚拟网卡并自动设置路由，DNS 沿用系统解析器，不启用 DNS 劫持或 fake-IP。面板控制的是**运行服务的机器**；连接远端面板不会改变浏览器所在电脑的路由。SSH 连接服务器时请确认网络条件后再开启。
+
+这里的 Proxy Mode 是 Mihomo 的规则、全局、直连模式。终端应用通过 `eval "$(proxyctl env)"` 使用代理；桌面系统的全局代理开关未接入。详见 [面板使用说明](docs/dashboard.md)。
+
 安装器优先查询 GitHub API；API 被限流或无法访问时，自动从官方发布页读取版本、资产和 SHA-256。下载仍失败时，可以仅对本次安装绕过环境代理：
 
 ```sh
@@ -114,7 +145,7 @@ GUI 原生协议入口为 `login --client-api` 和 `update --from-client-api`，
 ## 运行约定
 
 - 默认代理仅监听 `127.0.0.1:7890`，控制器仅监听随机本机端口并使用随机 secret。可用 `start --port 17890 --controller-port 19090` 修改。
-- 不启用 TUN、透明代理或独立 DNS 监听；不修改系统代理、路由、防火墙或开机自启动。`env` 只输出命令，须用户 `eval` 才影响当前 shell。
+- 默认不启用 TUN、透明代理或独立 DNS 监听；显式 `tun on` 会修改运行核心所在机器的路由。不修改桌面系统代理或开机自启动。`env` 只输出命令，须用户 `eval` 才影响当前 shell。
 - `env` 同时输出大小写代理变量，并合并既有 `NO_PROXY`/`no_proxy`。`env --unset` 清除代理变量，不恢复此前值，保留绕过列表。
 - 配置、URL、Cookie 和节点密码保存在 `$XDG_STATE_HOME/0dcloud-sh`（默认 `~/.local/state/0dcloud-sh`）。目录权限 700，文件 600；这些文件仍包含敏感信息，不应提交或分享。
 - 使用 `--state-dir /path` 创建独立实例。停止进程前会核对 PID、启动时间、boot ID 和 executable inode。

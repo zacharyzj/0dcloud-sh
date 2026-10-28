@@ -321,6 +321,14 @@ class CoreManager:
                        "tun": {"enable": False}, "dns": {"enable": False}, "ntp": {"enable": False, "write-to-system": False}, "log-level": "info"})
         config["external-controller-cors"] = {"allow-origins": [], "allow-private-network": False}
         config["profile"] = {"store-selected": True, "store-fake-ip": False}
+        options = self._options()
+        if options.get("mode"):
+            config["mode"] = options["mode"]
+        if options.get("tun"):
+            availability = self.tun_availability()
+            if not availability["available"]:
+                raise CoreError(availability["reason"] + "; run proxyctl tun off before starting without TUN")
+            config["tun"] = self._tun_config(True)
         for kind in ("proxy-providers", "rule-providers"):
             providers = config.get(kind, {})
             if not isinstance(providers, dict):
@@ -479,6 +487,99 @@ class CoreManager:
 
     def nodes(self):
         return self._api("GET", "/proxies").get("proxies", {})
+
+    def _options(self):
+        from .storage import State
+        options = State(self.state_dir).read("core-options.json")
+        if options.get("mode") not in (None, "rule", "global", "direct") or type(options.get("tun", False)) is not bool:
+            raise CoreError("Invalid saved runtime options")
+        return options
+
+    @staticmethod
+    def _tun_config(enabled):
+        # Keep DNS with the system resolver. Do not install global firewall or
+        # resolver changes. auto-route is the explicitly requested TUN effect.
+        return {"enable": enabled, "device": "odcloud0", "stack": "mixed", "mtu": 1500,
+                "auto-route": enabled, "auto-detect-interface": True,
+                "auto-redirect": False, "strict-route": False, "dns-hijack": []}
+
+    def tun_availability(self):
+        if platform.system() != "Linux":
+            return {"available": False, "reason": "TUN requires Linux"}
+        if not Path("/dev/net/tun").exists():
+            return {"available": False, "reason": "TUN device /dev/net/tun is unavailable"}
+        try:
+            # CapEff reflects the process actually doing the controller update;
+            # the core must have been started with the same privileges.
+            cap = next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines()
+                       if line.startswith("CapEff:"))
+            state = self._read_state()
+            if self._matches(state):
+                cap = next(line.split()[1] for line in Path(f"/proc/{state['pid']}/status").read_text().splitlines()
+                           if line.startswith("CapEff:"))
+            if not int(cap, 16) & (1 << 12):
+                return {"available": False, "reason": "Core requires CAP_NET_ADMIN; start it as root for TUN"}
+        except (OSError, StopIteration, ValueError):
+            return {"available": False, "reason": "Cannot verify TUN permissions"}
+        return {"available": True, "reason": "TUN changes system routing when enabled; DNS keeps the system resolver"}
+
+    def controls(self):
+        status = self.status()
+        options = self._options()
+        config = self._api("GET", "/configs") if status["running"] else {}
+        return {"status": status, "mode": config.get("mode", options.get("mode", "rule")),
+                "tun": bool(config.get("tun", {}).get("enable", options.get("tun", False))),
+                "tun_availability": self.tun_availability()}
+
+    def _set_control(self, key, value):
+        from .storage import State
+        with self._lock():
+            options = self._options()
+            running = self.status()["running"]
+            previous = self._api("GET", "/configs") if running else {}
+            patch = {key: self._tun_config(value) if key == "tun" else value}
+            try:
+                if running:
+                    self._api("PATCH", "/configs", patch)
+                    actual = self._api("GET", "/configs")
+                    applied = actual.get("tun", {}).get("enable", False) if key == "tun" else actual.get(key)
+                    if applied != value:
+                        raise CoreError("Core did not apply the requested setting; inspect core.log")
+                options[key] = value
+                State(self.state_dir).write(options, "core-options.json")
+            except (OSError, ClientError):
+                if running:
+                    try:
+                        self._api("PATCH", "/configs", {key: previous.get(key)})
+                    except CoreError:
+                        raise CoreError("Setting failed and rollback could not be verified; inspect core.log") from None
+                raise
+        return self.controls()
+
+    def mode(self, value=None):
+        if value is None:
+            return self.controls()
+        if value not in ("rule", "global", "direct"):
+            raise CoreError("Proxy mode must be rule, global or direct")
+        return self._set_control("mode", value)
+
+    def tun(self, enabled=None):
+        if enabled is None:
+            return self.controls()
+        if type(enabled) is not bool:
+            raise CoreError("TUN enable must be boolean")
+        if enabled:
+            check = self.tun_availability()
+            if not check["available"]:
+                raise CoreError(check["reason"])
+        return self._set_control("tun", enabled)
+
+    def delay(self, node):
+        if node not in self.nodes():
+            raise CoreError("Unknown proxy node")
+        path = "/proxies/" + urllib.parse.quote(node, safe="") + "/delay?" + urllib.parse.urlencode(
+            {"url": "https://www.google.com/generate_204", "timeout": 2000})
+        return self._api("GET", path)
 
     def use(self, group, node):
         proxies = self.nodes()

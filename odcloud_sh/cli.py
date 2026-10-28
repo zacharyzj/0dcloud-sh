@@ -59,6 +59,16 @@ def parser():
     sub.add_parser("stop", help="停止本工具启动的核心")
     sub.add_parser("status", help="查看运行状态")
     sub.add_parser("nodes", help="查看节点和代理组")
+    mode = sub.add_parser("mode", help="查看或在线切换规则/全局/直连模式，重启保留")
+    mode.add_argument("value", nargs="?", choices=["rule", "global", "direct"])
+    tun = sub.add_parser("tun", help="查看或切换 Linux TUN；开启需核心拥有 CAP_NET_ADMIN")
+    tun.add_argument("value", nargs="?", choices=["on", "off"])
+    dashboard = sub.add_parser("dashboard", help="启动带访问令牌的 HTTP 控制面板（前台运行）")
+    dashboard.add_argument("--host", default="0.0.0.0", choices=["0.0.0.0", "127.0.0.1"])
+    dashboard.add_argument("--port", type=int, default=8787)
+    dashboard.add_argument("--public-host", help="访问链接使用的 IPv4 地址；云服务器公网 NAT 场景可显式指定，启动后保留")
+    dashboard.add_argument("--open", action="store_true", help="同时打开本机浏览器")
+    dashboard.add_argument("--show-url", action="store_true", help="显示上次启动的面板访问地址和令牌")
     use = sub.add_parser("use", help="切换代理组选择")
     use.add_argument("node")
     use.add_argument("--group", default="PROXY")
@@ -132,6 +142,17 @@ def run(args):
             result = core.status()
         elif args.command == "nodes":
             result = core.nodes()
+        elif args.command == "mode":
+            result = core.mode(args.value)
+        elif args.command == "tun":
+            result = core.tun(None if args.value is None else args.value == "on")
+        elif args.command == "dashboard":
+            from .dashboard import serve, show_url
+            if args.show_url:
+                print(show_url(state, public_host=args.public_host))
+            else:
+                serve(core, state, host=args.host, port=args.port, open_browser=args.open, public_host=args.public_host)
+            return
         elif args.command == "use":
             result = core.use(args.group, args.node)
         elif args.command == "env":

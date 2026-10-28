@@ -79,7 +79,23 @@ proxyctl stop
 eval "$(proxyctl env --unset)"
 ```
 
-Mihomo 作为后台子进程运行，退出 SSH 不会停止；没有配置开机自启动。代理仅绑定 `127.0.0.1:7890`，不会开放到服务器公网，也不会修改 SSH、系统 DNS、路由、防火墙或全局代理。
+Mihomo 作为后台子进程运行，退出 SSH 不会停止；没有配置开机自启动。代理仅绑定 `127.0.0.1:7890`。TUN 默认关闭；显式 `tun on` 会修改核心所在服务器的路由，DNS 沿用系统解析器。
+
+## Dashboard
+
+```sh
+cd /root/0dcloud-sh
+source .venv/bin/activate
+proxyctl dashboard                 # 默认监听 0.0.0.0:8787，前台运行
+# 另一个 SSH 终端
+proxyctl dashboard --show-url
+```
+
+服务器已保存公网访问地址 `152.136.54.246`，直接打开 `--show-url` 输出的完整链接即可。面板提供节点选择、延迟测试、连接与断开、Rule/Global/Direct 切换和 TUN 开关。令牌每次面板启动更换；不需要再次输入账号密码。远程面板的 TUN 开关作用于服务器，不是访问面板的电脑。HTTP 无传输加密，HTTPS/SSH 转发和后台运行方式见 [面板说明](dashboard.md)。
+
+2026-10-28 已后台启动 `http://152.136.54.246:8787/`，无需再启动第二个同端口进程。访问令牌用上面的 `--show-url` 获取。进程 PID 记录在私有状态目录 `dashboard.pid`，日志在 `dashboard.log`，未配置开机自启动。
+
+CLI 同步提供 `proxyctl mode rule|global|direct`、`proxyctl tun on|off`。设置持久化，模式可在线切换。服务器日常使用可保持 TUN 关闭并通过代理端口访问。
 
 状态与配置在 `/root/.local/state/0dcloud-sh`，目录权限 700、敏感文件 600；不要分享 Cookie、完整订阅 URL 或 YAML 中的密码。备份和 `.mihomo-upload` 在服务器项目目录之外或被 Git 忽略。
 

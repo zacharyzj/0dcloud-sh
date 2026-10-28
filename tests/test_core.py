@@ -32,8 +32,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.headers.get('Authorization') != 'Bearer ' + cfg['secret']:
             self.send_error(401); return
-        body = json.dumps({'version':'fake'} if self.path == '/version' else {'proxies':proxies}).encode()
+        body = json.dumps({'version':'fake'} if self.path == '/version' else
+                          cfg if self.path == '/configs' else {'proxies':proxies}).encode()
         self.send_response(200); self.end_headers(); self.wfile.write(body)
+    def do_PATCH(self):
+        if self.headers.get('Authorization') != 'Bearer ' + cfg['secret']:
+            self.send_error(401); return
+        cfg.update(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+        self.send_response(204); self.end_headers()
     def do_PUT(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         proxies['Select']['now'] = body['name']
@@ -193,6 +199,63 @@ class CoreTests(unittest.TestCase):
                 self.manager.start(config={}, port=port)
         with self.assertRaises(CoreError):
             self.manager.start(config={}, port=7890, controller_port=7890)
+
+    def test_mode_changes_live_and_survives_restart(self):
+        self.start(mode='rule')
+        for mode in ('global', 'direct', 'rule'):
+            self.assertEqual(self.manager.mode(mode)['mode'], mode)
+            self.assertEqual(self.manager._api('GET', '/configs')['mode'], mode)
+        self.manager.mode('global')
+        self.manager.stop()
+        self.assertEqual(self.manager.controls()['mode'], 'global')
+        self.start(mode='rule')
+        self.assertEqual(self.manager.controls()['mode'], 'global')
+        with self.assertRaisesRegex(CoreError, 'Proxy mode'):
+            self.manager.mode('invalid')
+        self.assertEqual(self.manager.controls()['mode'], 'global')
+
+    def test_tun_requires_privileges_and_can_be_disabled_offline(self):
+        with mock.patch.object(self.manager, 'tun_availability', return_value={'available': False, 'reason': 'no capability'}):
+            with self.assertRaisesRegex(CoreError, 'no capability'):
+                self.manager.tun(True)
+            self.assertFalse(self.manager.tun(False)['tun'])
+            with self.assertRaises(CoreError):
+                self.manager.tun('on')
+        with mock.patch.object(self.manager, 'tun_availability', return_value={'available': True, 'reason': ''}):
+            self.manager.tun(True)
+            self.start()
+            self.assertTrue(self.manager.controls()['tun'])
+            runtime = yaml.safe_load(self.manager.runtime_path.read_text())
+            self.assertTrue(runtime['tun']['auto-route'])
+            self.assertFalse(runtime['dns']['enable'])
+            self.assertFalse(self.manager.tun(False)['tun'])
+
+    def test_control_rollback_on_save_failure(self):
+        from odcloud_sh.storage import State
+        self.start(mode='rule')
+        with mock.patch.object(State, 'write', side_effect=OSError('read-only')):
+            with self.assertRaises(OSError):
+                self.manager.mode('global')
+        self.assertEqual(self.manager.controls()['mode'], 'rule')
+        self.assertFalse((self.manager.state_dir / 'core-options.json').exists())
+
+    def test_control_rollback_on_verification_failure(self):
+        self.start(mode='rule')
+        original_api = self.manager._api
+        reads = 0
+        def api(method, path, payload=None):
+            nonlocal reads
+            result = original_api(method, path, payload)
+            if method == 'GET' and path == '/configs':
+                reads += 1
+                if reads == 2:
+                    return {'mode': 'rule'}
+            return result
+        with mock.patch.object(self.manager, '_api', side_effect=api):
+            with self.assertRaisesRegex(CoreError, 'did not apply'):
+                self.manager.mode('global')
+        self.assertEqual(self.manager.controls()['mode'], 'rule')
+        self.assertFalse((self.manager.state_dir / 'core-options.json').exists())
 
 
 if __name__ == '__main__':
