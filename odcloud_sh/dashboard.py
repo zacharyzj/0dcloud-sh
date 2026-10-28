@@ -1,13 +1,17 @@
 """Small authenticated HTTP dashboard. Core secret stays on the server."""
 
 import hmac
+import hashlib
 import ipaddress
 import json
+import os
+from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 import secrets
 import socket
 import threading
+import time
 import webbrowser
 
 from .errors import ClientError
@@ -41,7 +45,7 @@ def show_url(state, public_host=None):
     host = access.get("host", "127.0.0.1")
     address = display_host(host, public_host) if public_host else (
         access.get("display_host") or display_host(host, access.get("public_host")))
-    return f"http://{address}:{access['port']}/#token={access['token']}"
+    return f"http://{address}:{access['port']}/"
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -50,12 +54,38 @@ class DashboardServer(ThreadingHTTPServer):
     def __init__(self, core, host="0.0.0.0", port=8787):
         if host not in ("0.0.0.0", "127.0.0.1") or type(port) is not int or not 1024 <= port <= 65535:
             raise ClientError("Dashboard host must be 0.0.0.0 or 127.0.0.1; port must be 1024..65535")
+        password = os.environ.get("_0dcloud_pass")
+        if not password:
+            raise ClientError("Dashboard requires _0dcloud_pass; source ~/.zshrc and export _0dcloud_pass before starting")
+        self.password_salt = secrets.token_bytes(16)
+        self.password_hash = self.hash_password(password)
+        self.sessions = {}
+        self.login_attempts = []
+        self.auth_lock = threading.Lock()
         self.core = core
-        self.token = secrets.token_urlsafe(32)
         self.action_lock = threading.Lock()
         self.proxy_port = core.controls()["status"].get("proxy_port") or 7890
         self.page = files("odcloud_sh").joinpath("dashboard.html").read_bytes()
         super().__init__((host, port), DashboardHandler)
+
+    def hash_password(self, password):
+        return hashlib.scrypt(password.encode(), salt=self.password_salt, n=16384, r=8, p=1)
+
+    def login(self, password):
+        with self.auth_lock:
+            now = time.monotonic()
+            self.login_attempts = [stamp for stamp in self.login_attempts if now - stamp < 60]
+            if len(self.login_attempts) >= 10:
+                return 429, None
+            self.login_attempts.append(now)
+            if not hmac.compare_digest(self.hash_password(password), self.password_hash):
+                return 401, None
+            self.sessions = {key: expiry for key, expiry in self.sessions.items() if expiry > now}
+            if len(self.sessions) >= 64:
+                self.sessions.pop(next(iter(self.sessions)))
+            session = secrets.token_urlsafe(32)
+            self.sessions[hashlib.sha256(session.encode()).digest()] = now + 12 * 3600
+            return 200, session
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -67,13 +97,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         super().setup()
         self.connection.settimeout(10)
 
-    def respond(self, status, body, content_type="application/json; charset=utf-8"):
+    def respond(self, status, body, content_type="application/json; charset=utf-8", cookie=None):
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
@@ -85,11 +117,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             pass
 
     def authorized(self):
-        header = self.headers.get("Authorization", "")
-        if not hmac.compare_digest(header.encode(), ("Bearer " + self.server.token).encode()):
-            self.respond(401, {"error": "请输入有效的面板访问令牌"})
+        key = self.session_key()
+        with self.server.auth_lock:
+            expiry = self.server.sessions.get(key, 0)
+            if expiry <= time.monotonic():
+                self.server.sessions.pop(key, None)
+        if expiry <= time.monotonic():
+            self.respond(401, {"error": "请使用账号密码登录面板"})
             return False
-        # No CORS. Block foreign browser origins even if a token was supplied.
+        return self.same_origin()
+
+    def session_key(self):
+        try:
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            value = cookies.get("odcloud_session")
+            return hashlib.sha256(value.value.encode()).digest() if value else None
+        except CookieError:
+            return None
+
+    def session_cookie(self, session, *, clear=False):
+        cookie = f"odcloud_session={session}; Path=/; HttpOnly; SameSite=Strict"
+        if clear:
+            cookie += "; Max-Age=0"
+        if self.headers.get("Origin", "").startswith("https://"):
+            cookie += "; Secure"
+        return cookie
+
+    def same_origin(self):
+        # JSON-only actions, SameSite cookies and browser origin checks prevent CSRF.
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if self.headers.get("Sec-Fetch-Site") == "cross-site" or (
@@ -126,9 +181,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.respond(500, {"error": "无法读取核心状态"})
 
     def do_POST(self):
-        if not self.authorized():
+        if self.path == "/api/login":
+            if not self.same_origin():
+                return
+        elif not self.authorized():
             return
-        if self.path not in ("/api/use", "/api/mode", "/api/tun", "/api/start", "/api/stop", "/api/delay", "/api/connect", "/api/disconnect"):
+        if self.path not in ("/api/login", "/api/logout", "/api/use", "/api/mode", "/api/tun", "/api/start", "/api/stop", "/api/delay", "/api/connect", "/api/disconnect"):
             self.respond(404, {"error": "接口不存在"})
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -143,6 +201,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise ValueError()
         except (ValueError, OSError):
             self.respond(400, {"error": "无效的 JSON 请求"})
+            return
+        if self.path == "/api/login":
+            password = data.get("password")
+            if not isinstance(password, str) or not password or len(password.encode()) > 4096:
+                self.respond(400, {"error": "请输入密码"})
+                return
+            status, session = self.server.login(password)
+            if status != 200:
+                self.respond(status, {"error": "登录尝试过多，请一分钟后重试" if status == 429 else "密码错误"})
+            else:
+                self.respond(200, {"authenticated": True}, cookie=self.session_cookie(session))
+            return
+        if self.path == "/api/logout":
+            with self.server.auth_lock:
+                self.server.sessions.pop(self.session_key(), None)
+            self.respond(200, {"authenticated": False}, cookie=self.session_cookie("", clear=True))
             return
         try:
             with self.server.action_lock:
@@ -188,7 +262,7 @@ def serve(core, state, *, host="0.0.0.0", port=8787, open_browser=False, public_
     address = display_host(host, public_host)
     with DashboardServer(core, host, port) as server:
         state.write({"host": host, "display_host": address, "public_host": public_host,
-                     "port": server.server_port, "token": server.token}, "dashboard-access.json")
+                     "port": server.server_port}, "dashboard-access.json")
         url = show_url(state)
         print(f"Dashboard listening on {host}:{server.server_port}", flush=True)
         print(url, flush=True)

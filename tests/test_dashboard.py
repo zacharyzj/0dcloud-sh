@@ -1,6 +1,7 @@
 import copy
 import http.client
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -72,7 +73,10 @@ class DashboardTests(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        self.server = DashboardServer(self.core, port=port)
+        self.password = 'fixture-password-测试'
+        with mock.patch.dict(os.environ, {'_0dcloud_pass': self.password}):
+            self.server = DashboardServer(self.core, port=port)
+        self.cookie = None
         self.assertEqual(self.server.server_address[0], '0.0.0.0')
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
@@ -83,7 +87,11 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(cleanup)
 
     def request(self, path, data=None, *, auth=True, headers=None, raw=None):
-        values = {'Authorization': 'Bearer ' + self.server.token} if auth else {}
+        if auth and self.cookie is None:
+            status, response_headers, _ = self.request('/api/login', {'password': self.password}, auth=False)
+            self.assertEqual(status, 200)
+            self.cookie = response_headers['Set-Cookie'].split(';', 1)[0]
+        values = {'Cookie': self.cookie} if auth else {}
         values.update(headers or {})
         body = None
         if data is not None or raw is not None:
@@ -103,11 +111,11 @@ class DashboardTests(unittest.TestCase):
         status, headers, page = self.request('/', auth=False)
         self.assertEqual(status, 200)
         self.assertIn('0dcloud', page)
-        self.assertNotIn(self.server.token, page)
+        self.assertNotIn(self.password, page)
         self.assertEqual(headers['Cache-Control'], 'no-store')
         self.assertEqual(headers['Referrer-Policy'], 'no-referrer')
         self.assertEqual(self.request('/api/state', auth=False)[0], 401)
-        self.assertEqual(self.request('/api/state', headers={'Authorization': 'Bearer wrong'})[0], 401)
+        self.assertEqual(self.request('/api/state', headers={'Cookie': 'odcloud_session=wrong'})[0], 401)
         status, headers, data = self.request('/api/state')
         self.assertEqual(status, 200)
         self.assertEqual(data['proxies']['Proxy']['now'], 'one')
@@ -148,7 +156,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.request('/api/start', {}, headers={'Content-Type': 'text/plain'})[0], 415)
         self.assertEqual(self.request('/api/configs', {})[0], 404)
         self.assertEqual(self.request('/../../settings.json')[0], 404)
-        self.assertEqual(self.request('/api/state?token=' + self.server.token, auth=False)[0], 404)
+        self.assertEqual(self.request('/api/state?token=old-token', auth=False)[0], 404)
 
     def test_connect_disconnect_idempotent_and_preserve_settings(self):
         self.core.value['status']['proxy_port'] = 17890
@@ -178,12 +186,39 @@ class DashboardTests(unittest.TestCase):
         state = State(self.temp.name)
         with self.assertRaises(ClientError):
             show_url(state)
-        state.write({'port': self.server.server_port, 'token': self.server.token}, 'dashboard-access.json')
-        self.assertIn('/#token=', show_url(state))
+        state.write({'port': self.server.server_port, 'token': 'old-token'}, 'dashboard-access.json')
+        self.assertEqual(show_url(state), f'http://127.0.0.1:{self.server.server_port}/')
         self.assertEqual(state.path('dashboard-access.json').stat().st_mode & 0o777, 0o600)
         for host, port in (('example.test', 8787), ('0.0.0.0', 80), ('0.0.0.0', True)):
             with self.assertRaises(ClientError):
                 DashboardServer(self.core, host, port)
+
+    def test_password_login_logout_and_expiry(self):
+        self.assertEqual(self.request('/api/login', {'password': 'wrong'}, auth=False)[0], 401)
+        status, headers, data = self.request('/api/login', {'password': self.password}, auth=False)
+        self.assertEqual(status, 200)
+        self.assertTrue(data['authenticated'])
+        self.assertIn('HttpOnly', headers['Set-Cookie'])
+        self.assertIn('SameSite=Strict', headers['Set-Cookie'])
+        self.assertNotIn(self.password, json.dumps(data))
+        cookie = headers['Set-Cookie'].split(';', 1)[0]
+        self.assertEqual(self.request('/api/state', auth=False, headers={'Cookie': cookie})[0], 200)
+        self.assertEqual(self.request('/api/logout', {}, auth=False, headers={'Cookie': cookie})[0], 200)
+        self.assertEqual(self.request('/api/state', auth=False, headers={'Cookie': cookie})[0], 401)
+        status, headers, _ = self.request('/api/login', {'password': self.password}, auth=False)
+        for key in self.server.sessions:
+            self.server.sessions[key] = 0
+        self.assertEqual(self.request('/api/state', auth=False, headers={'Cookie': headers['Set-Cookie'].split(';', 1)[0]})[0], 401)
+
+    def test_login_cross_origin_rate_limit_and_missing_password(self):
+        self.assertEqual(self.request('/api/login', {'password': self.password}, auth=False,
+                                      headers={'Origin': 'https://foreign.test'})[0], 403)
+        for _ in range(10):
+            self.assertEqual(self.request('/api/login', {'password': 'bad'}, auth=False)[0], 401)
+        self.assertEqual(self.request('/api/login', {'password': self.password}, auth=False)[0], 429)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ClientError, '_0dcloud_pass'):
+                DashboardServer(self.core, port=18787)
 
     def test_access_address_auto_detect_and_cloud_nat_override(self):
         state = State(self.temp.name)
@@ -192,7 +227,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(display_host('0.0.0.0'), '10.2.0.7')
         state.write({'host': '0.0.0.0', 'display_host': '152.136.54.246',
                      'public_host': '152.136.54.246', 'port': 8787, 'token': 'fixture'}, 'dashboard-access.json')
-        self.assertEqual(show_url(state), 'http://152.136.54.246:8787/#token=fixture')
+        self.assertEqual(show_url(state), 'http://152.136.54.246:8787/')
         self.assertEqual(display_host('127.0.0.1', '152.136.54.246'), '127.0.0.1')
         for address in ('bad/host', '0.0.0.0', '127.0.0.1', '224.0.0.1'):
             with self.assertRaises(ClientError):

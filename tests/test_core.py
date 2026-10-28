@@ -239,6 +239,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.manager.controls()['mode'], 'rule')
         self.assertFalse((self.manager.state_dir / 'core-options.json').exists())
 
+    def test_tun_keeps_system_dns_outside_proxy_udp_path(self):
+        files = {
+            '/etc/resolv.conf': 'nameserver 127.0.0.53\nnameserver 183.60.83.19\nnameserver bad\n',
+            '/run/systemd/resolve/resolv.conf': 'nameserver 183.60.83.19\nnameserver 183.60.82.98\nnameserver ::1\n',
+        }
+        with mock.patch.object(Path, 'read_text', autospec=True, side_effect=lambda path: files[str(path)]):
+            config = self.manager._tun_config(True)
+        self.assertEqual(config['route-exclude-address'], ['183.60.82.98/32', '183.60.83.19/32'])
+        self.assertTrue(config['auto-route'])
+        self.assertEqual(config['dns-hijack'], [])
+        self.assertNotIn('route-exclude-address', self.manager._tun_config(False))
+
     def test_control_rollback_on_verification_failure(self):
         self.start(mode='rule')
         original_api = self.manager._api

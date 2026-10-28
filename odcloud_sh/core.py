@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import gzip
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -499,9 +500,36 @@ class CoreManager:
     def _tun_config(enabled):
         # Keep DNS with the system resolver. Do not install global firewall or
         # resolver changes. auto-route is the explicitly requested TUN effect.
-        return {"enable": enabled, "device": "odcloud0", "stack": "mixed", "mtu": 1500,
+        config = {"enable": enabled, "device": "odcloud0", "stack": "mixed", "mtu": 1500,
                 "auto-route": enabled, "auto-detect-interface": True,
                 "auto-redirect": False, "strict-route": False, "dns-hijack": []}
+        if enabled:
+            # auto-route otherwise captures port 53 even for on-link resolvers.
+            # Some nodes (e.g. AnyTLS) cannot forward UDP. Keep the system's
+            # resolver reachable directly, including systemd-resolved upstreams.
+            routes = set()
+            paths = [Path("/etc/resolv.conf")]
+            for path in paths:
+                try:
+                    text = path.read_text()
+                except OSError:
+                    continue
+                for line in text.splitlines():
+                    parts = line.split()
+                    if len(parts) < 2 or parts[0] != "nameserver":
+                        continue
+                    try:
+                        address = ipaddress.ip_address(parts[1])
+                    except ValueError:
+                        continue
+                    if address.is_loopback:
+                        upstream = Path("/run/systemd/resolve/resolv.conf")
+                        if upstream not in paths:
+                            paths.append(upstream)
+                    elif address.version == 4 and not (address.is_unspecified or address.is_multicast):
+                        routes.add(str(address) + "/32")
+            config["route-exclude-address"] = sorted(routes)
+        return config
 
     def tun_availability(self):
         if platform.system() != "Linux":
