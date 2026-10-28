@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "0dcloud-sh"
+version = "0.1.0"
+description = "A terminal client for account sessions, Clash subscriptions and Mihomo"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0", "requests>=2.28"]
+
+[project.scripts]
+proxyctl = "odcloud_sh.cli:main"
+
+[tool.setuptools]
+packages = ["odcloud_sh"]
+
