@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 from .errors import ClientError
 from .network import new_session, request, validate_url, origin
-from .subscription import decode_subscription, save_config, update_subscription
+from .subscription import update_subscription
 
 
 def api_endpoint(base, path):
@@ -105,30 +105,6 @@ def login(state, *, api_url=None, login_path=None, password_field=None):
     return {"authenticated": True}
 
 
-def fetch_client_config(state):
-    settings = state.read()
-    base = settings.get("api_url")
-    if not base or not state.read("session.json"):
-        raise ClientError("尚未登录，请先执行 login。")
-    with account_session(state, base) as session:
-        payload, _ = request(session, "POST", api_endpoint(base, "/clientConfig"), data={})
-        result = json_result(payload)
-        body = result.get("data")
-        if isinstance(body, dict) and any(k in body for k in ("ciphertext", "tag", "iv")):
-            raise ClientError("服务返回加密配置，需要确认客户端签名及 AES-GCM 协议；可先使用标准订阅地址。")
-        if isinstance(body, dict):
-            body = body.get("yaml", body.get("config", body))
-        if isinstance(body, dict):
-            body = json.dumps(body)
-        if not isinstance(body, str):
-            raise ClientError("服务未返回可识别配置，需要适配实际客户端协议。")
-        config = decode_subscription(body.encode())
-        _save_cookies(state, session, base)
-    path = save_config(state, config)
-    return {"path": str(path), "nodes": len(config.get("proxies", [])),
-            "providers": len(config.get("proxy-providers", {}))}
-
-
 class _DashboardLinks(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -206,4 +182,5 @@ def update_from_account(state):
 def logout(state):
     path = state.path("session.json")
     path.unlink(missing_ok=True)
+    state.path("client-session.json").unlink(missing_ok=True)
 

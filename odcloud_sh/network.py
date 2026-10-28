@@ -98,7 +98,7 @@ class _NoImplicitAuth(requests.auth.AuthBase):
         return request
 
 
-def validate_url(url):
+def validate_url(url, *, allow_http=False):
     try:
         parts = urlsplit(url)
         port = parts.port
@@ -111,22 +111,23 @@ def validate_url(url):
         local = local or ipaddress.ip_address(parts.hostname).is_loopback
     except ValueError:
         pass
-    if parts.scheme != "https" and not (parts.scheme == "http" and local):
+    if parts.scheme != "https" and not (parts.scheme == "http" and (local or allow_http)):
         raise ClientError("远程服务必须使用 HTTPS；仅本机测试允许 HTTP。")
     return parts
 
 
-def origin(url):
-    p = validate_url(url)
+def origin(url, *, allow_http=False):
+    p = validate_url(url, allow_http=allow_http)
     return p.scheme, p.hostname.lower(), p.port or (443 if p.scheme == "https" else 80)
 
 
-def request(session, method, url, *, data=None, headers=None, timeout=25, redirects=False):
-    validate_url(url)
+def request(session, method, url, *, data=None, params=None, headers=None, timeout=25,
+            redirects=False, allow_http=False):
+    validate_url(url, allow_http=allow_http)
     method = method.upper()
     for attempt in range(6):
         try:
-            with session.request(method, url, data=data, headers=headers, timeout=(10, timeout),
+            with session.request(method, url, data=data, params=params, headers=headers, timeout=(10, timeout),
                                  allow_redirects=False, stream=True) as response:
                 if response.is_redirect or response.is_permanent_redirect:
                     if not redirects or method != "GET":
@@ -135,11 +136,12 @@ def request(session, method, url, *, data=None, headers=None, timeout=25, redire
                     if not location:
                         raise ClientError("服务返回无效重定向。")
                     target = urljoin(url, location)
-                    validate_url(target)
+                    validate_url(target, allow_http=allow_http)
                     # Credentials and account cookies must never cross origins.
-                    if origin(target) != origin(url):
+                    if origin(target, allow_http=allow_http) != origin(url, allow_http=allow_http):
                         raise ClientError("订阅跳转到了其他站点；请核实并直接设置最终地址。")
                     url = target
+                    params = None
                     continue
                 if response.status_code in (401, 403):
                     raise ClientError("服务拒绝访问（401/403）；请检查登录状态或订阅有效期。")

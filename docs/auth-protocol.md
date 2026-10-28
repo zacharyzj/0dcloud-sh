@@ -25,4 +25,4 @@ $.ajax({
 
 页面默认勾选 `remember-me`，没有指定 value，因此表单值是 `on`。脚本对返回值采用 `ret === 1` 成功、`ret === 2` 二步验证、`ret === 0` 失败分支。检查时页面配置的 geetest 和 recaptcha 开关均为 false；如果站点日后启用验证码，需要另行适配，当前工具不会绕过验证码。
 
-网站 Cookie 登录和原 Flutter 客户端的 `/authorization`、`/clientConfig` 是不同协议。样本存在 `X-Client-*` 签名、`decryptClientPayloadB64`、AES-GCM 和 `clientconfig://app2` 内部来源标记；尚未恢复对应 API 地址、签名规范和加密封装。当前账号配置获取适配器只支持显式确认的明文 JSON/YAML 返回，不声称兼容私有客户端协议。普通 Clash/Mihomo HTTPS 订阅链路独立实现。
+网站 Cookie 登录和原 Flutter 客户端的 `/authorization`、`/clientConfig` 是不同协议。现已恢复原生 API 发现、HMAC-SHA256 签名和 AES-GCM 封装，并通过真实登录及 22 个节点的配置刷新验证，详见 [GUI 原生协议](native-client-protocol.md)。网站和客户端会话分别保存，不能互相替代。`clientconfig://app2` 是 GUI 内部来源标记，不是 HTTP 地址。

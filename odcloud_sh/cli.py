@@ -8,7 +8,8 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .auth import login, logout, fetch_client_config, update_from_account
+from .auth import login, logout, update_from_account
+from .client_api import discover_client_api, login_client, fetch_client_config
 from .errors import ClientError
 from .network import network_mode, new_session, request
 from .auth import api_endpoint
@@ -27,6 +28,8 @@ def parser():
     auth.add_argument("--login-path", help="登录路径，默认 /auth/login（网站公开表单）")
     auth.add_argument("--password-field", choices=["passwd", "password"])
     auth.add_argument("--direct", action="store_true", help="本次账号请求不使用环境代理，仍校验证书")
+    auth.add_argument("--client-api", action="store_true", help="使用 GUI 原生 /authorization 协议；需显式指定 API")
+    auth.add_argument("--allow-http", action="store_true", help="仅客户端 API：明确允许用 HTTP 明文传输账号密码")
     sub.add_parser("logout", help="删除本地会话，不删除订阅")
     subscription = sub.add_parser("subscription", help="配置订阅地址")
     subscription.add_subparsers(dest="subscription_command", required=True).add_parser("set", help="隐藏输入订阅 URL")
@@ -34,16 +37,22 @@ def parser():
     update.add_argument("--direct", action="store_true", help="本次账号和订阅请求不使用环境代理")
     source = update.add_mutually_exclusive_group()
     source.add_argument("--from-account", action="store_true", help="从已登录网站账号页发现并下载 Clash 订阅")
-    source.add_argument("--from-client-api", action="store_true", help="实验性：从已确认的 /clientConfig API 获取明文配置")
+    source.add_argument("--from-client-api", action="store_true", help="使用 GUI 签名和 AES-GCM 协议刷新，需账号环境变量")
+    update.add_argument("--allow-http", action="store_true", help="仅客户端 API：明确允许用 HTTP 明文传输账号密码")
+    discovery = sub.add_parser("discover", help="读取 GUI 公开发现配置，显示 API 地址；不发送账号或自动登录")
+    discovery.add_argument("--direct", action="store_true", help="本次公开发现请求不使用环境代理")
     doctor = sub.add_parser("doctor", help="只读检查登录页连通性，不发送账号凭据")
     doctor.add_argument("--api-url", help="站点地址，默认使用已保存地址")
     doctor.add_argument("--direct", action="store_true", help="不使用环境代理，仍校验证书")
     core = sub.add_parser("core", help="安装官方 Mihomo")
-    install = core.add_subparsers(dest="core_command", required=True).add_parser("install")
+    core_commands = core.add_subparsers(dest="core_command", required=True)
+    install = core_commands.add_parser("install")
     install.add_argument("--url", help="指定核心下载地址（不含凭据）")
     install.add_argument("--version", default="latest")
     install.add_argument("--sha256", help="校验下载文件的 SHA256")
     install.add_argument("--direct", action="store_true", help="本次核心版本查询和下载不使用环境代理")
+    geodata = core_commands.add_parser("geodata", help="从官方 MetaCubeX CDN 安装当前配置需要的地理规则数据库")
+    geodata.add_argument("--direct", action="store_true", help="本次数据库下载不使用环境代理")
     start = sub.add_parser("start", help="校验配置并后台运行 Mihomo")
     start.add_argument("--port", type=int, default=7890, help="本机 HTTP/SOCKS 混合代理端口")
     start.add_argument("--controller-port", type=int, help="本机控制端口，默认自动分配")
@@ -69,11 +78,22 @@ def run(args):
         return
     state = State(args.state_dir)
     if args.command == "login":
-        login(state, api_url=args.api_url, login_path=args.login_path, password_field=args.password_field)
+        if args.client_api:
+            if not args.api_url:
+                raise ClientError("客户端登录请用 --api-url 明确指定目标；可先运行 discover 查看公开配置。")
+            if args.login_path or args.password_field:
+                raise ClientError("客户端登录使用样本固定协议，不支持网站登录字段选项。")
+            login_client(state, api_url=args.api_url, allow_http=args.allow_http)
+        else:
+            if args.allow_http:
+                raise ClientError("--allow-http 仅适用于 --client-api。")
+            login(state, api_url=args.api_url, login_path=args.login_path, password_field=args.password_field)
         print("登录成功，会话已保存；密码未写入磁盘。")
     elif args.command == "logout":
         logout(state)
         print("本地会话已删除。")
+    elif args.command == "discover":
+        print(json.dumps(discover_client_api(), ensure_ascii=False, indent=2))
     elif args.command == "doctor":
         base = args.api_url or state.read().get("api_url")
         if not base:
@@ -87,10 +107,12 @@ def run(args):
         set_subscription(state, url.strip())
         print("订阅地址已保存。")
     elif args.command == "update":
+        if args.allow_http and not args.from_client_api:
+            raise ClientError("--allow-http 仅适用于 --from-client-api。")
         if args.from_account:
             result = update_from_account(state)
         elif args.from_client_api:
-            result = fetch_client_config(state)
+            result = fetch_client_config(state, allow_http=args.allow_http)
         else:
             result = update_subscription(state)
         print(f"配置已更新：{result['nodes']} 个节点，{result['providers']} 个节点提供者。")
@@ -98,7 +120,10 @@ def run(args):
         from .core import CoreManager
         core = CoreManager(state.directory, args.core)
         if args.command == "core":
-            result = core.install(url=args.url, version=args.version, sha256=args.sha256)
+            if args.core_command == "geodata":
+                result = core.install_geodata()
+            else:
+                result = core.install(url=args.url, version=args.version, sha256=args.sha256)
         elif args.command == "start":
             result = core.start(state.path("subscription.yaml"), port=args.port, controller_port=args.controller_port)
         elif args.command == "stop":

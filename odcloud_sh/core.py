@@ -267,6 +267,41 @@ class CoreManager:
             _atomic(self.state_dir / "core-install.json", json.dumps(info, indent=2).encode())
             return info
 
+    def install_geodata(self, config_path=None):
+        """Install only databases required by the downloaded configuration."""
+        try:
+            config = yaml.safe_load(Path(config_path or self.state_dir / "subscription.yaml").read_text())
+        except (OSError, yaml.YAMLError) as exc:
+            raise CoreError("Download a configuration before installing geodata") from exc
+        if not isinstance(config, dict) or not isinstance(config.get("rules", []), list):
+            raise CoreError("Invalid configuration rules")
+        rules = config.get("rules", [])
+        if not all(isinstance(rule, str) for rule in rules):
+            raise CoreError("Invalid configuration rules")
+        needed = []
+        if any(re.search(r"(?:^|[,(])GEOSITE,", rule, re.I) for rule in rules):
+            needed.append(("GeoSite.dat", "geosite.dat"))
+        if any(re.search(r"(?:^|[,(])GEOIP,", rule, re.I) for rule in rules):
+            needed.append(("GeoIP.dat", "geoip.dat") if config.get("geodata-mode")
+                          else ("Country.mmdb", "country.mmdb"))
+        result = []
+        with self._lock():
+            self.data_dir.mkdir(mode=0o700, exist_ok=True)
+            for filename, asset in needed:
+                dest = self.data_dir / filename
+                if dest.is_file() and dest.stat().st_size > 100:
+                    result.append({"name": filename, "downloaded": False})
+                    continue
+                payload = _request("https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/" + asset)
+                valid = (b"\xab\xcd\xefMaxMind.com" in payload[-131072:] if asset.endswith(".mmdb")
+                         else payload.startswith(b"\x0a"))
+                if len(payload) < 100 or not valid:
+                    raise CoreError("Invalid geodata download; existing database unchanged")
+                _atomic(dest, payload)
+                result.append({"name": filename, "downloaded": True,
+                               "sha256": hashlib.sha256(payload).hexdigest()})
+        return {"databases": result}
+
     def _safe_config(self, config, port, controller_port, secret):
         if not isinstance(config, dict):
             raise CoreError("Mihomo config must be a mapping")
@@ -335,7 +370,7 @@ class CoreManager:
                 raise CoreError("Mihomo configuration validation could not finish") from exc
             if result.returncode:
                 # Do not expose downloaded subscription credentials through errors.
-                raise CoreError("Mihomo rejected the runtime configuration; no core was started")
+                raise CoreError("Mihomo rejected the runtime configuration; check rules and run core geodata --direct for missing databases")
             fd = os.open(self.log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
             try:
                 os.fchmod(fd, 0o600)

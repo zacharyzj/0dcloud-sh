@@ -14,7 +14,7 @@ from urllib.parse import parse_qs
 
 import yaml
 
-from odcloud_sh.auth import login, fetch_client_config, logout, json_result, discover_subscription, update_from_account
+from odcloud_sh.auth import login, logout, json_result, discover_subscription, update_from_account
 from odcloud_sh.cli import main
 from odcloud_sh.errors import ClientError
 from odcloud_sh.network import new_session, request, validate_url
@@ -101,7 +101,7 @@ class ClientTests(unittest.TestCase):
 
     def test_login_persists_cookie_but_not_password_and_fetches_config(self):
         self.assertTrue(login(self.state, api_url=self.base)["authenticated"])
-        result = fetch_client_config(self.state)
+        result = update_from_account(self.state)
         self.assertEqual(result["nodes"], 1)
         self.assertEqual(yaml.safe_load(self.state.path("subscription.yaml").read_text()), CONFIG)
         for path in self.state.directory.iterdir():
@@ -143,7 +143,7 @@ class ClientTests(unittest.TestCase):
         settings["api_url"] = "http://127.0.0.1:1"
         self.state.write(settings)
         with self.assertRaisesRegex(ClientError, "其他 API"):
-            fetch_client_config(self.state)
+            discover_subscription(self.state)
 
     def test_decode_yaml_json_base64_and_unicode_nodes(self):
         self.assertEqual(decode_subscription(json.dumps(CONFIG).encode()), CONFIG)
@@ -175,7 +175,7 @@ class ClientTests(unittest.TestCase):
         login(self.state, api_url=self.base)
         self.state.write({"api_url": self.base, "cookies": [None]}, "session.json")
         with self.assertRaisesRegex(ClientError, "损坏"):
-            fetch_client_config(self.state)
+            discover_subscription(self.state)
 
     def test_subscription_never_implicitly_loads_netrc(self):
         with new_session() as session, patch("requests.sessions.get_netrc_auth", return_value=("secret", "secret")) as netrc:
