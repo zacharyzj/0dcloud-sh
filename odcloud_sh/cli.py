@@ -56,6 +56,18 @@ def parser():
     start = sub.add_parser("start", help="校验配置并后台运行 Mihomo")
     start.add_argument("--port", type=int, default=7890, help="本机 HTTP/SOCKS 混合代理端口")
     start.add_argument("--controller-port", type=int, help="本机控制端口，默认自动分配")
+    connect = sub.add_parser("connect", help="启动代理并恢复上次节点；无有效选择时自动选择代理节点")
+    connect.add_argument("--port", type=int, default=7890, help="未运行时使用的本机代理端口")
+    connect.add_argument("--controller-port", type=int, help="未运行时使用的本机控制端口")
+    connect.add_argument("--group", help="代理组；默认按当前模式和配置自动识别")
+    autostart = sub.add_parser("autostart", help="管理本机 systemd 开机自启动（启用/禁用需 root）")
+    autostart_commands = autostart.add_subparsers(dest="autostart_command", required=True)
+    enable = autostart_commands.add_parser("enable", help="登记开机启动，保留当前运行的代理")
+    enable.add_argument("--port", type=int, default=7890)
+    enable.add_argument("--controller-port", type=int)
+    enable.add_argument("--group")
+    autostart_commands.add_parser("disable", help="取消开机启动，保留当前运行的代理")
+    autostart_commands.add_parser("status", help="查看开机启动状态")
     sub.add_parser("stop", help="停止本工具启动的核心")
     sub.add_parser("status", help="查看运行状态")
     sub.add_parser("nodes", help="查看节点和代理组")
@@ -136,6 +148,18 @@ def run(args):
                 result = core.install(url=args.url, version=args.version, sha256=args.sha256)
         elif args.command == "start":
             result = core.start(state.path("subscription.yaml"), port=args.port, controller_port=args.controller_port)
+        elif args.command == "connect":
+            result = core.connect(state.path("subscription.yaml"), port=args.port,
+                                  controller_port=args.controller_port, group=args.group)
+        elif args.command == "autostart":
+            from . import autostart
+            if args.autostart_command == "enable":
+                result = autostart.enable(core, group=args.group, port=args.port,
+                                          controller_port=args.controller_port)
+            elif args.autostart_command == "disable":
+                result = autostart.disable()
+            else:
+                result = autostart.status()
         elif args.command == "stop":
             result = core.stop()
         elif args.command == "status":

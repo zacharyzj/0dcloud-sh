@@ -26,7 +26,8 @@ if '-t' in sys.argv:
     sys.exit(1 if cfg.get('reject_test') else 0)
 if cfg.get('exit_test'):
     sys.exit(1)
-proxies = {'Select': {'type': 'Selector', 'all': ['one', 'two'], 'now': 'one'}, 'one': {'type': 'Shadowsocks'}}
+proxies = {'Select': {'type': 'Selector', 'all': ['one', 'two'], 'now': 'one'},
+           'one': {'type': 'Shadowsocks'}, 'two': {'type': 'Shadowsocks'}}
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
@@ -96,6 +97,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(runtime['dns'], {'enable':False})
         self.assertFalse(runtime['allow-lan'])
         self.assertEqual(runtime['external-controller'], '127.0.0.1:9090')
+        self.assertTrue(runtime['profile']['store-selected'])
         for key in ('port', 'redir-port', 'tproxy-port', 'external-controller-unix', 'listeners', 'tunnels', 'external-ui-url', 'routing-mark'):
             self.assertNotIn(key, runtime)
         self.start()
@@ -104,6 +106,17 @@ class CoreTests(unittest.TestCase):
         for path in (self.manager.runtime_path, self.manager.state_path, self.manager.log_path):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.manager.state_dir.stat().st_mode), 0o700)
+
+    def test_connect_starts_then_reuses_core_and_keeps_current_node(self):
+        config_path = self.manager.state_dir / 'subscription.yaml'
+        config_path.write_text(yaml.safe_dump({'rules': ['MATCH,Select']}))
+        first = self.manager.connect(config_path)
+        self.assertTrue(first['status']['running'])
+        self.assertEqual((first['group'], first['node']), ('Select', 'one'))
+        self.manager.use('Select', 'two')
+        second = self.manager.connect(config_path)
+        self.assertEqual(second['status']['pid'], first['status']['pid'])
+        self.assertEqual(second['node'], 'two')
 
     def test_configuration_is_validated_before_launch(self):
         with self.assertRaisesRegex(CoreError, 'rejected'):

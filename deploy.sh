@@ -12,7 +12,7 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf -- "$tmp_dir"' EXIT
 tar --exclude=__pycache__ --exclude='*.pyc' -czf "$tmp_dir/source.tar.gz" -C "$project_dir" \
-    README.md pyproject.toml .gitignore proxyctl proxyctl.zsh init.sh deploy.sh odcloud_sh tests docs
+    README.md pyproject.toml .gitignore proxyctl proxyctl.zsh init.sh start-proxy.sh deploy.sh odcloud_sh tests docs
 ssh "$target" "umask 077; mkdir -p '$remote_dir'; backup_dir=\$(mktemp -d /root/0dcloud-sh-backup.XXXXXX); tar --exclude=.git --exclude=.venv --exclude=__pycache__ -czf \"\$backup_dir/source-before.tar.gz\" -C '$remote_dir' .; printf 'Backup: %s\\n' \"\$backup_dir\""
 scp "$tmp_dir/source.tar.gz" "$target:$remote_dir/.source-deploy.tar.gz"
 ssh "$target" "tar -xzf '$remote_dir/.source-deploy.tar.gz' -C '$remote_dir'; rm '$remote_dir/.source-deploy.tar.gz'"

@@ -489,6 +489,73 @@ class CoreManager:
     def nodes(self):
         return self._api("GET", "/proxies").get("proxies", {})
 
+    @staticmethod
+    def _proxy_route(proxies, name, seen=()):
+        """Keep a cached selection when it reaches a proxy; otherwise plan a fallback."""
+        item = proxies.get(name)
+        if name in seen or not isinstance(item, dict):
+            return None
+        kind = item.get("type", "").lower()
+        if kind in ("direct", "reject", "rejectdrop", "pass", "compatible") or not kind:
+            return None
+        if "all" not in item:
+            return name, []
+        current = item.get("now")
+        candidates = item["all"] if kind == "selector" else []
+        for candidate in dict.fromkeys(([current] if current in item["all"] else []) + candidates):
+            route = CoreManager._proxy_route(proxies, candidate, (*seen, name))
+            if route is not None:
+                node, changes = route
+                if kind == "selector" and candidate != current:
+                    changes = [*changes, (name, candidate)]
+                return node, changes
+        return None
+
+    def connect(self, config_path=None, port=7890, controller_port=None, *, group=None):
+        """Start if needed, then restore a proxy route or choose the first proxy."""
+        if not self.status()["running"]:
+            self.start(config_path or self.state_dir / "subscription.yaml", port=port,
+                       controller_port=controller_port)
+        controls = self.controls()
+        mode = controls["mode"]
+        proxies = self.nodes()
+        if group is None:
+            if mode == "global":
+                group = "GLOBAL"
+            else:
+                # The terminal rule identifies the main group in most subscriptions.
+                try:
+                    config = yaml.safe_load(self.runtime_path.read_text())
+                    for rule in reversed(config.get("rules", [])):
+                        parts = [part.strip() for part in rule.split(",")]
+                        if len(parts) >= 2 and parts[0].upper() in ("MATCH", "FINAL"):
+                            if parts[1] in proxies and "all" in proxies[parts[1]]:
+                                group = parts[1]
+                            break
+                except (OSError, yaml.YAMLError):
+                    pass
+                if group is None:
+                    group = next((name for name, item in proxies.items() if name != "GLOBAL"
+                                  and item.get("type", "").lower() == "selector"
+                                  and self._proxy_route(proxies, name) is not None), None)
+        if group not in proxies or "all" not in proxies[group]:
+            raise CoreError("没有可用的代理组；请用 nodes 查看配置，并用 --group 指定代理组。")
+        route = self._proxy_route(proxies, group)
+        if route is None:
+            raise CoreError("代理组中没有可选择的代理节点，请更新订阅或用 --group 指定其他代理组。")
+        node, changes = route
+        if mode == "global" and group != "GLOBAL":
+            global_group = proxies.get("GLOBAL", {})
+            if group not in global_group.get("all", []):
+                raise CoreError("指定的代理组不在 GLOBAL 中，无法用于当前全局模式。")
+            if global_group.get("now") != group:
+                changes.append(("GLOBAL", group))
+        for selected_group, selected_node in changes:
+            self.use(selected_group, selected_node)
+        if mode == "direct":
+            self.mode("rule")
+        return {"status": self.status(), "group": group, "node": node}
+
     def _options(self):
         from .storage import State
         options = State(self.state_dir).read("core-options.json")

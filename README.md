@@ -73,6 +73,33 @@ eval "$(proxyctl env --unset)"
 
 `update` 成功后保存配置，下载或解析失败保留旧配置；它不会自动影响正在运行的核心。需要应用新配置时执行 `stop`、`start`。
 
+初始化完成后，日常一键开启代理（支持 Bash/Zsh，无需先激活虚拟环境）：
+
+```sh
+source ./start-proxy.sh
+# 指定状态目录、代理组或首次启动端口：
+source ./start-proxy.sh --state-dir /path/to/state --group Proxy --port 17890
+```
+
+脚本复用正在运行的核心，否则用已下载的配置启动。Mihomo 会恢复上次保存的节点；原节点已移除、没有历史选择或当前选择直连/拒绝时，自动选择组内第一个代理节点，支持嵌套选择组并避开循环。默认按当前模式和配置的最终规则识别代理组，可用 `--group` 指定。直连模式会切回规则模式；规则/全局模式及 TUN 设置沿用现有值。节点选择不做测速。
+
+`source` 同时设置当前终端的代理环境变量。也可用 `eval "$(./start-proxy.sh)"`；直接执行 `./start-proxy.sh` 会启动核心并输出环境命令，当前终端须通过 `source` 或 `eval` 应用。仅启动核心和选节点可用 `proxyctl connect`。缺少核心或订阅时会报错，可先运行初始化脚本。
+
+使用 systemd 的 Linux 主机可显式登记机器开机自启动，启用和禁用需要 root：
+
+```sh
+# 以 root 执行，使用与初始化相同的状态目录；同时设置当前终端代理。
+source ./start-proxy.sh --enable-autostart
+# 自定义状态目录、代理组和端口时，这些参数也会保存到自启动服务。
+source ./start-proxy.sh --enable-autostart --state-dir /path/to/state --group Proxy --port 17890
+./start-proxy.sh --autostart-status
+./start-proxy.sh --disable-autostart
+```
+
+服务名为 `0dcloud-proxy.service`，单元文件为 `/etc/systemd/system/0dcloud-proxy.service`。启用前会先成功启动并选择节点，之后登记下次开机启动；已运行时保存实际代理端口。开机会用缓存配置恢复节点，不需要登录或账号环境变量。项目目录、虚拟环境和状态目录须保留；重复启用会更新启动参数。取消自启动只移除开机启动设置，保留当前代理。可用 `journalctl -u 0dcloud-proxy.service` 查看启动日志。
+
+开机自启动负责启动本机代理服务；新终端仍可用 `source ./start-proxy.sh` 设置代理环境变量。
+
 ## Dashboard、代理模式与 TUN
 
 启动 HTTP 面板，默认监听 **`0.0.0.0:8787`**：
@@ -149,7 +176,7 @@ GUI 原生协议入口为 `login --client-api` 和 `update --from-client-api`，
 ## 运行约定
 
 - 默认代理仅监听 `127.0.0.1:7890`，控制器仅监听随机本机端口并使用随机 secret。可用 `start --port 17890 --controller-port 19090` 修改。
-- 默认不启用 TUN、透明代理或独立 DNS 监听；显式 `tun on` 会修改运行核心所在机器的路由。不修改桌面系统代理或开机自启动。`env` 只输出命令，须用户 `eval` 才影响当前 shell。
+- 默认不启用 TUN、透明代理或独立 DNS 监听；显式 `tun on` 会修改运行核心所在机器的路由。不修改桌面系统代理；开机自启动须显式使用 `start-proxy.sh --enable-autostart` 登记。`env` 只输出命令，须用户 `eval` 才影响当前 shell。
 - `env` 同时输出大小写代理变量，并合并既有 `NO_PROXY`/`no_proxy`。`env --unset` 清除代理变量，不恢复此前值，保留绕过列表。
 - 配置、URL、Cookie 和节点密码保存在 `$XDG_STATE_HOME/0dcloud-sh`（默认 `~/.local/state/0dcloud-sh`）。目录权限 700，文件 600；这些文件仍包含敏感信息，不应提交或分享。
 - 使用 `--state-dir /path` 创建独立实例。停止进程前会核对 PID、启动时间、boot ID 和 executable inode。

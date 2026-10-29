@@ -50,6 +50,27 @@ GitHub 资产下载超时可使用上传的本地核心：
 
 ## 日常操作
 
+已有核心和订阅时，一键启动、恢复上次节点并设置当前终端代理：
+
+```sh
+cd /root/0dcloud-sh
+source ./start-proxy.sh
+# 代理组无法自动识别时指定：source ./start-proxy.sh --group Proxy
+```
+
+无需激活虚拟环境。核心已运行时直接复用；上次节点不可选时选择组内第一个代理节点。不会自动刷新订阅或测速。
+
+将当前服务器加入开机自启动（root、systemd）：
+
+```sh
+source ./start-proxy.sh --enable-autostart
+./start-proxy.sh --autostart-status
+# 取消开机启动，当前代理继续运行：
+./start-proxy.sh --disable-autostart
+```
+
+自定义的 `--state-dir`、`--core`、`--group` 和实际代理端口会写入 `0dcloud-proxy.service`，重启后仍恢复上次节点。保留项目目录、虚拟环境和状态目录；自启动不需要账号密码。启动日志可用 `journalctl -u 0dcloud-proxy.service` 查看。新终端的代理环境变量仍通过 `source ./start-proxy.sh` 设置。
+
 ```sh
 cd /root/0dcloud-sh
 source .venv/bin/activate
@@ -79,7 +100,7 @@ proxyctl stop
 eval "$(proxyctl env --unset)"
 ```
 
-Mihomo 作为后台子进程运行，退出 SSH 不会停止；没有配置开机自启动。代理仅绑定 `127.0.0.1:7890`。TUN 默认关闭；显式 `tun on` 会修改核心所在服务器的路由，DNS 沿用系统解析器。
+Mihomo 作为后台子进程运行，退出 SSH 不会停止；开机自启动可通过上述选项显式启用。代理仅绑定 `127.0.0.1:7890`。TUN 默认关闭；显式 `tun on` 会修改核心所在服务器的路由，DNS 沿用系统解析器。
 
 ## Dashboard
 
