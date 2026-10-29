@@ -10,4 +10,4 @@ dist/
 .mihomo-upload
 .source-deploy.tar.gz
 dashboard.log
-
+nohup.out
